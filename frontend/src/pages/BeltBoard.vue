@@ -15,6 +15,12 @@ import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
 import { useReefStore } from '@/stores/reefStore'
 import { ORIENTATION_ORDER, useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useSiteMeasurementStore } from '@/stores/siteMeasurementStore'
+import {
+  SITE_COORDINATE_HOLD_THRESHOLD_M,
+  SITE_RECONCILE_STATUS_LABEL,
+  getSiteCoordinateGap
+} from '@/types/site'
 import { BELT_LENGTH_PRESETS, ORIENTATIONS } from '@/types/belt'
 import type { Belt, Orientation } from '@/types/belt'
 import { bleachGrade, bleachIndex, coralCoveragePct, fishDensity } from '@/utils/bleach'
@@ -25,10 +31,20 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const measurementStore = useSiteMeasurementStore()
 
 const siteId = computed(() => String(route.params.id ?? ''))
 const site = computed(() => reefStore.siteById(siteId.value))
 const reef = computed(() => (site.value ? reefStore.reefById(site.value.reefId) : null))
+const siteMeasurement = computed(() => measurementStore.measurementForSite(site.value))
+const siteGap = computed(() =>
+  site.value && siteMeasurement.value ? getSiteCoordinateGap(site.value, siteMeasurement.value) : null
+)
+const deploymentBlocked = computed(() =>
+  site.value && siteGap.value
+    ? siteGap.value.coordinateOutOfTolerance && site.value.reconcileStatus !== 'verified'
+    : false
+)
 
 const dialogVisible = ref(false)
 const editingId = ref<string | null>(null)
@@ -141,9 +157,14 @@ async function submitForm(): Promise<void> {
       await beltStore.updateBelt(editingId.value, payload)
       ElMessage.success('样带已更新')
     } else {
-      const created = await beltStore.createBelt(siteId.value, payload)
-      beltStore.selectBelt(created.id)
-      ElMessage.success(`样带 ${created.no}（${created.orientation}向 ${created.lengthM} m）已布设，可录入底质与珊瑚计数`)
+      try {
+        const created = await beltStore.createBelt(siteId.value, payload)
+        beltStore.selectBelt(created.id)
+        ElMessage.success(`样带 ${created.no}（${created.orientation}向 ${created.lengthM} m）已按档案坐标布设，可录入底质与珊瑚计数`)
+      } catch (error) {
+        ElMessage.error(error instanceof Error ? error.message : '样带布设失败')
+        return
+      }
     }
     dialogVisible.value = false
   } finally {
@@ -191,6 +212,10 @@ function gotoFishes(belt: Belt): void {
 }
 
 onMounted(() => {
+  reefStore.start()
+  beltStore.start()
+  surveyStore.start()
+  measurementStore.start()
   if (reefStore.reefs.length === 0) void initDatabase()
   if (site.value) reefStore.selectSite(site.value.id)
 })
@@ -227,16 +252,35 @@ onMounted(() => {
           </el-breadcrumb>
           <h2 class="page__title">
             站位 {{ site.no }} · 样带布设
-            <el-tag size="small" effect="plain">水深 {{ site.depthM }} m</el-tag>
+            <el-tag size="small" effect="plain">档案水深 {{ site.chartDepthM }} m</el-tag>
             <el-tag size="small" type="info" effect="plain">{{ site.substrate }}</el-tag>
+            <el-tag
+              size="small"
+              :type="deploymentBlocked ? 'danger' : site.reconcileStatus === 'verified' ? 'success' : 'info'"
+              effect="plain"
+            >
+              {{ SITE_RECONCILE_STATUS_LABEL[site.reconcileStatus] }}
+            </el-tag>
           </h2>
           <p class="gb-hint">
-            布设样带后录入长度、朝向与调查日期；同朝向内样带编号不可重复，列表按北 → 东 → 南 → 西排序。
+            样带只按测绘组档案坐标落位；当前锚点 {{ site.chartLat.toFixed(4) }}, {{ site.chartLng.toFixed(4) }}。
+            <template v-if="siteMeasurement && siteGap">
+              外业实测相距 {{ Math.round(siteGap.distanceM) }} m，阈值 {{ SITE_COORDINATE_HOLD_THRESHOLD_M }} m。
+            </template>
           </p>
         </div>
         <div class="page__actions">
           <el-button :icon="Warning" @click="applyOrientationOrder">朝向排序校验</el-button>
-          <el-button type="primary" :icon="Plus" @click="openCreate">新增样带</el-button>
+          <el-tooltip
+            v-if="deploymentBlocked"
+            content="实测与档案超差，样带已压住；等测绘组核对档案后再放"
+            placement="top"
+          >
+            <span>
+              <el-button type="primary" :icon="Plus" disabled>新增样带</el-button>
+            </span>
+          </el-tooltip>
+          <el-button v-else type="primary" :icon="Plus" @click="openCreate">新增样带</el-button>
         </div>
       </div>
 
@@ -246,6 +290,15 @@ onMounted(() => {
         <StatBadge label="珊瑚记录" :value="stats.coralCount" suffix="条" tone="success" icon="Histogram" />
         <StatBadge label="计数记录" :value="stats.fishCount" suffix="条" tone="warning" icon="DataLine" />
       </div>
+
+      <el-alert
+        v-if="deploymentBlocked"
+        type="error"
+        show-icon
+        :closable="false"
+        title="实测坐标与档案坐标超差，新样带已压住；已布样带仍保留在档案坐标，等测绘组核对后再放。"
+        class="page__alert"
+      />
 
       <el-alert
         v-if="conflicts.length > 0"
@@ -268,6 +321,12 @@ onMounted(() => {
         <el-table-column label="朝向" width="90" align="center">
           <template #default="{ row }">
             <el-tag size="small" effect="plain">{{ row.belt.orientation }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="档案落位" min-width="170">
+          <template #default="{ row }">
+            <div class="gb-mono">{{ row.belt.anchorLat.toFixed(4) }}, {{ row.belt.anchorLng.toFixed(4) }}</div>
+            <div class="gb-hint">锚定海图档案坐标</div>
           </template>
         </el-table-column>
         <el-table-column label="长度 (m)" width="110" align="right">
@@ -393,6 +452,10 @@ onMounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.page__alert {
+  margin-top: -2px;
 }
 
 .page__unit {

@@ -17,7 +17,7 @@ const routes: RouteRecordRaw[] = [
     path: '/reefs/:id/sites',
     name: 'site-list',
     component: () => import('@/pages/SiteList.vue'),
-    meta: { title: '站位列表与水深标记', icon: 'Grid' }
+    meta: { title: '站位档案与实测对账', icon: 'Grid' }
   },
   {
     path: '/sites/:id/belts',

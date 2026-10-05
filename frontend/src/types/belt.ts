@@ -18,6 +18,10 @@ export interface Belt {
   surveyDate: string
   /** 调查人 */
   observer: string
+  /** 布设时锚定的测绘档案海图纬度 */
+  anchorLat: number
+  /** 布设时锚定的测绘档案海图经度 */
+  anchorLng: number
   createdAt: number
   updatedAt: number
 }

@@ -9,6 +9,7 @@ import { DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-v
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
+import { useSiteMeasurementStore } from '@/stores/siteMeasurementStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
 
 const route = useRoute()
@@ -16,11 +17,13 @@ const router = useRouter()
 const reefStore = useReefStore()
 const beltStore = useBeltStore()
 const surveyStore = useSurveyStore()
+const measurementStore = useSiteMeasurementStore()
 
 onMounted(() => {
   reefStore.start()
   beltStore.start()
   surveyStore.start()
+  measurementStore.start()
 })
 
 /** 层级路由统一归属到最上层导航项 */
@@ -107,7 +110,7 @@ function go(path: string): void {
         本地库 {{ DB_NAME }} · 结构版本 v{{ DB_VERSION }} · 数据仅存于本浏览器 IndexedDB，不上传任何服务器。
       </span>
       <span>
-        礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
+        礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 外业实测 {{ measurementStore.measurements.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
         {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }}
       </span>
     </footer>

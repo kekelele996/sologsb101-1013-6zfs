@@ -46,7 +46,14 @@ const router = useRouter()
 const reefStore = useReefStore()
 const surveyStore = useSurveyStore()
 
-const EMPTY_COUNTS: CountMap = { reefs: 0, sites: 0, belts: 0, corals: 0, fishes: 0 }
+const EMPTY_COUNTS: CountMap = {
+  reefs: 0,
+  sites: 0,
+  siteMeasurements: 0,
+  belts: 0,
+  corals: 0,
+  fishes: 0
+}
 
 const counts = ref<CountMap>(EMPTY_COUNTS)
 const lastBackupAt = ref<string | null>(null)
@@ -440,7 +447,7 @@ onMounted(() => {
       <div class="gb-panel-title">
         <h3>结构版本与全量 JSON 导入导出</h3>
         <span class="gb-hint">
-          导出内容包含 reefs / sites / belts / corals / fishes 五张表 · 最近备份
+          导出内容包含 reefs / sites / siteMeasurements / belts / corals / fishes 六张表 · 最近备份
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}
         </span>
       </div>
@@ -477,6 +484,7 @@ onMounted(() => {
         <el-descriptions-item label="本地库名">{{ DB_NAME }}</el-descriptions-item>
         <el-descriptions-item label="结构版本">v{{ DB_VERSION }}（浏览器记录 v{{ stampedVersion }}）</el-descriptions-item>
         <el-descriptions-item label="礁区 / 站位">{{ counts.reefs }} / {{ counts.sites }}</el-descriptions-item>
+        <el-descriptions-item label="外业实测">{{ counts.siteMeasurements }}</el-descriptions-item>
         <el-descriptions-item label="样带 / 珊瑚记录">{{ counts.belts }} / {{ counts.corals }}</el-descriptions-item>
         <el-descriptions-item label="鱼类计数">{{ counts.fishes }}</el-descriptions-item>
         <el-descriptions-item label="最近备份时间">

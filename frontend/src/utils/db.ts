@@ -7,13 +7,13 @@
  */
 import Dexie, { liveQuery, type Table } from 'dexie'
 import type { Reef } from '@/types/reef'
-import type { Site } from '@/types/site'
+import type { Site, SiteMeasurement } from '@/types/site'
 import type { Belt } from '@/types/belt'
 import type { CoralRecord } from '@/types/coralRecord'
 import type { FishCount } from '@/types/fishCount'
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbcoralbelt'
@@ -32,6 +32,7 @@ export interface BackupPayload {
   exportedAt: string
   reefs: Reef[]
   sites: Site[]
+  siteMeasurements: SiteMeasurement[]
   belts: Belt[]
   corals: CoralRecord[]
   fishes: FishCount[]
@@ -40,6 +41,7 @@ export interface BackupPayload {
 export class CoralBeltDatabase extends Dexie {
   reefs!: Table<Reef, string>
   sites!: Table<Site, string>
+  siteMeasurements!: Table<SiteMeasurement, string>
   belts!: Table<Belt, string>
   corals!: Table<CoralRecord, string>
   fishes!: Table<FishCount, string>
@@ -57,7 +59,7 @@ export class CoralBeltDatabase extends Dexie {
     })
 
     // v2：补齐筛选与统计需要的索引（位置/面积、经纬度/水深、样带长度与朝向、白化等级、类别）
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         reefs: 'id, name, location, protectStatus, areaKm2, manager, updatedAt',
         sites: 'id, reefId, no, lat, lng, depthM, substrate, updatedAt',
@@ -85,6 +87,51 @@ export class CoralBeltDatabase extends Dexie {
               Object.assign(row, factory())
             })
         }
+      })
+
+    // v3：拆分测绘组海图档案与外业队实测数据；样带锚定档案坐标。
+    this.version(DB_VERSION)
+      .stores({
+        reefs: 'id, name, location, protectStatus, areaKm2, manager, updatedAt',
+        sites: 'id, reefId, no, chartLat, chartLng, chartDepthM, substrate, reconcileStatus, reconciledAt, updatedAt',
+        siteMeasurements: 'id, reefId, no, measuredLat, measuredLng, measuredDepthM, measuredAt, updatedAt',
+        belts: 'id, siteId, no, lengthM, orientation, surveyDate, observer, anchorLat, anchorLng, updatedAt',
+        corals: 'id, beltId, genus, form, coverCm, bleachLevel, updatedAt',
+        fishes: 'id, beltId, family, count, sizeClass, category, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        const siteRows = (await tx.table('sites').toArray()) as Array<Record<string, unknown>>
+        const siteCoordinateById = new Map<string, { lat: number; lng: number }>()
+
+        await tx
+          .table('sites')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            const chartLat = typeof row.chartLat === 'number' ? row.chartLat : Number(row.lat ?? 0)
+            const chartLng = typeof row.chartLng === 'number' ? row.chartLng : Number(row.lng ?? 0)
+            const chartDepthM =
+              typeof row.chartDepthM === 'number' ? row.chartDepthM : Number(row.depthM ?? 5)
+            row.chartLat = chartLat
+            row.chartLng = chartLng
+            row.chartDepthM = chartDepthM
+            if (typeof row.substrate !== 'string') row.substrate = '珊瑚礁石'
+            row.reconcileStatus = 'unmeasured'
+            row.reconciledAt = null
+            siteCoordinateById.set(String(row.id), { lat: chartLat, lng: chartLng })
+            delete row.lat
+            delete row.lng
+            delete row.depthM
+          })
+
+        // 旧数据未记录坐标来源，按现有站位补出测绘档案一份；已布样带锚定这份档案。
+        await tx
+          .table('belts')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            const anchor = siteCoordinateById.get(String(row.siteId))
+            row.anchorLat = typeof row.anchorLat === 'number' ? row.anchorLat : anchor?.lat ?? 0
+            row.anchorLng = typeof row.anchorLng === 'number' ? row.anchorLng : anchor?.lng ?? 0
+          })
       })
   }
 }
@@ -151,6 +198,7 @@ interface SeedBelt {
 export async function seedDemoData(): Promise<void> {
   const now = Date.now()
   const today = new Date(now).toISOString().slice(0, 10)
+  const measuredAt = `${today} 09:30`
 
   const reefs: Array<Omit<Reef, 'createdAt' | 'updatedAt'>> = [
     {
@@ -184,37 +232,84 @@ export async function seedDemoData(): Promise<void> {
       id: 'site_ql_01',
       reefId: 'reef_ql01',
       no: 'S-01',
-      lat: 19.5621,
-      lng: 110.7924,
-      depthM: 4.2,
-      substrate: '珊瑚礁石'
+      chartLat: 19.5621,
+      chartLng: 110.7924,
+      chartDepthM: 4.2,
+      substrate: '珊瑚礁石',
+      reconcileStatus: 'verified',
+      reconciledAt: now
     },
     {
       id: 'site_ql_02',
       reefId: 'reef_ql01',
       no: 'S-02',
-      lat: 19.5487,
-      lng: 110.8103,
-      depthM: 8.6,
-      substrate: '礁砂'
+      chartLat: 19.5487,
+      chartLng: 110.8103,
+      chartDepthM: 8.6,
+      substrate: '礁砂',
+      reconcileStatus: 'pending',
+      reconciledAt: null
     },
     {
       id: 'site_yr_01',
       reefId: 'reef_yr02',
       no: 'S-01',
-      lat: 16.8342,
-      lng: 112.3286,
-      depthM: 12.4,
-      substrate: '砾石'
+      chartLat: 16.8342,
+      chartLng: 112.3286,
+      chartDepthM: 12.4,
+      substrate: '砾石',
+      reconcileStatus: 'failed',
+      reconciledAt: null
     },
     {
       id: 'site_dz_01',
       reefId: 'reef_dz03',
       no: 'S-01',
-      lat: 18.6712,
-      lng: 110.4913,
-      depthM: 6.8,
-      substrate: '岩礁'
+      chartLat: 18.6712,
+      chartLng: 110.4913,
+      chartDepthM: 6.8,
+      substrate: '岩礁',
+      reconcileStatus: 'unmeasured',
+      reconciledAt: null
+    }
+  ]
+
+  const siteMeasurements: Array<Omit<SiteMeasurement, 'createdAt' | 'updatedAt'>> = [
+    {
+      id: 'meas_ql_01',
+      reefId: 'reef_ql01',
+      no: 'S-01',
+      measuredLat: 19.56232,
+      measuredLng: 110.79255,
+      measuredDepthM: 4.4,
+      measuredAt
+    },
+    {
+      id: 'meas_ql_02',
+      reefId: 'reef_ql01',
+      no: 'S-02',
+      measuredLat: 19.5506,
+      measuredLng: 110.8119,
+      measuredDepthM: 9.1,
+      measuredAt
+    },
+    {
+      id: 'meas_yr_01',
+      reefId: 'reef_yr02',
+      no: 'S-01',
+      measuredLat: 16.8364,
+      measuredLng: 112.3307,
+      measuredDepthM: 12.8,
+      measuredAt
+    },
+    {
+      id: 'meas_ql_orphan',
+      reefId: 'reef_ql01',
+      no: 'S-99',
+      measuredLat: 19.5518,
+      measuredLng: 110.8026,
+      measuredDepthM: 7.2,
+      measuredAt
     }
   ]
 
@@ -314,33 +409,48 @@ export async function seedDemoData(): Promise<void> {
     }
   ]
 
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
-    const stamp = (offset: number): { createdAt: number; updatedAt: number } => ({
-      createdAt: now + offset,
-      updatedAt: now + offset
-    })
+  const siteById = new Map(sites.map((site) => [site.id, site]))
 
-    await db.reefs.bulkPut(reefs.map((reef, index) => ({ ...reef, ...stamp(index) })))
-    await db.sites.bulkPut(sites.map((site, index) => ({ ...site, ...stamp(100 + index) })))
-    await db.belts.bulkPut(
-      belts.map((belt, index) => {
-        const { corals, fishes, ...rest } = belt
-        void corals
-        void fishes
-        return { ...rest, ...stamp(200 + index) }
+  await db.transaction(
+    'rw',
+    [db.reefs, db.sites, db.siteMeasurements, db.belts, db.corals, db.fishes],
+    async () => {
+      const stamp = (offset: number): { createdAt: number; updatedAt: number } => ({
+        createdAt: now + offset,
+        updatedAt: now + offset
       })
-    )
-    await db.corals.bulkPut(
-      belts.flatMap((belt, beltIndex) =>
-        belt.corals.map((coral, coralIndex) => ({ ...coral, ...stamp(300 + beltIndex * 100 + coralIndex) }))
+
+      await db.reefs.bulkPut(reefs.map((reef, index) => ({ ...reef, ...stamp(index) })))
+      await db.sites.bulkPut(sites.map((site, index) => ({ ...site, ...stamp(100 + index) })))
+      await db.siteMeasurements.bulkPut(
+        siteMeasurements.map((measurement, index) => ({ ...measurement, ...stamp(140 + index) }))
       )
-    )
-    await db.fishes.bulkPut(
-      belts.flatMap((belt, beltIndex) =>
-        belt.fishes.map((fish, fishIndex) => ({ ...fish, ...stamp(400 + beltIndex * 100 + fishIndex) }))
+      await db.belts.bulkPut(
+        belts.map((belt, index) => {
+          const { corals, fishes, ...rest } = belt
+          void corals
+          void fishes
+          const site = siteById.get(belt.siteId)
+          return {
+            ...rest,
+            anchorLat: site?.chartLat ?? 0,
+            anchorLng: site?.chartLng ?? 0,
+            ...stamp(200 + index)
+          }
+        })
       )
-    )
-  })
+      await db.corals.bulkPut(
+        belts.flatMap((belt, beltIndex) =>
+          belt.corals.map((coral, coralIndex) => ({ ...coral, ...stamp(300 + beltIndex * 100 + coralIndex) }))
+        )
+      )
+      await db.fishes.bulkPut(
+        belts.flatMap((belt, beltIndex) =>
+          belt.fishes.map((fish, fishIndex) => ({ ...fish, ...stamp(400 + beltIndex * 100 + fishIndex) }))
+        )
+      )
+    }
+  )
 }
 
 /** 打开数据库并幂等播种：仅当礁区表为空时灌入演示数据 */
@@ -355,9 +465,20 @@ export async function initDatabase(): Promise<void> {
 
 /** 清空全部业务表（导入覆盖与重置共用） */
 export async function clearAllTables(): Promise<void> {
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
-    await Promise.all([db.reefs.clear(), db.sites.clear(), db.belts.clear(), db.corals.clear(), db.fishes.clear()])
-  })
+  await db.transaction(
+    'rw',
+    [db.reefs, db.sites, db.siteMeasurements, db.belts, db.corals, db.fishes],
+    async () => {
+      await Promise.all([
+        db.reefs.clear(),
+        db.sites.clear(),
+        db.siteMeasurements.clear(),
+        db.belts.clear(),
+        db.corals.clear(),
+        db.fishes.clear()
+      ])
+    }
+  )
 }
 
 /** 清空并重新播种演示数据 */
@@ -368,14 +489,15 @@ export async function resetDatabase(): Promise<void> {
 
 /** 统计各表行数，供页脚概览与覆盖度页展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+  const [reefs, sites, siteMeasurements, belts, corals, fishes] = await Promise.all([
     db.reefs.count(),
     db.sites.count(),
+    db.siteMeasurements.count(),
     db.belts.count(),
     db.corals.count(),
     db.fishes.count()
   ])
-  return { reefs, sites, belts, corals, fishes }
+  return { reefs, sites, siteMeasurements, belts, corals, fishes }
 }
 
 /** 写入结构版本号到 localStorage，便于覆盖度页比对 */

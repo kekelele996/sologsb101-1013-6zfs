@@ -18,16 +18,63 @@ import {
 import { bleachGrade, bleachIndex, bleachedSharePct, coralCoveragePct, fishDensity, round } from '@/utils/bleach'
 
 /** 备份集合键名 */
-export const BACKUP_KEYS = ['reefs', 'sites', 'belts', 'corals', 'fishes'] as const
+export const BACKUP_KEYS = ['reefs', 'sites', 'siteMeasurements', 'belts', 'corals', 'fishes'] as const
 export type BackupKey = (typeof BACKUP_KEYS)[number]
 
 export type CountMap = Record<BackupKey, number>
 
+function toNumber(value: unknown, fallback: number): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+/** 兼容 v2 备份：旧 lat/lng/depthM 视为测绘组档案，并补核对状态。 */
+function normalizeArchiveSites(rows: unknown[]): BackupPayload['sites'] {
+  return rows.map((value) => {
+    const row = value as Record<string, unknown>
+    return {
+      ...row,
+      chartLat: toNumber(row.chartLat ?? row.lat, 0),
+      chartLng: toNumber(row.chartLng ?? row.lng, 0),
+      chartDepthM: toNumber(row.chartDepthM ?? row.depthM, 5),
+      substrate: typeof row.substrate === 'string' ? row.substrate : '珊瑚礁石',
+      reconcileStatus:
+        row.reconcileStatus === 'pending' || row.reconcileStatus === 'verified' || row.reconcileStatus === 'failed'
+          ? row.reconcileStatus
+          : 'unmeasured',
+      reconciledAt: typeof row.reconciledAt === 'number' ? row.reconciledAt : null
+    }
+  }) as BackupPayload['sites']
+}
+
+/** 兼容 v2 备份：已布样带没有锚点时，按旧站位档案坐标补锚点。 */
+function normalizeBelts(
+  rows: unknown[],
+  legacySites: unknown[]
+): BackupPayload['belts'] {
+  const legacySiteById = new Map(
+    legacySites.map((value) => {
+      const site = value as Record<string, unknown>
+      return [String(site.id), site]
+    })
+  )
+  return rows.map((value) => {
+    const row = value as Record<string, unknown>
+    const site = legacySiteById.get(String(row.siteId))
+    return {
+      ...row,
+      anchorLat: toNumber(row.anchorLat ?? site?.chartLat ?? site?.lat, 0),
+      anchorLng: toNumber(row.anchorLng ?? site?.chartLng ?? site?.lng, 0)
+    }
+  }) as BackupPayload['belts']
+}
+
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+  const [reefs, sites, siteMeasurements, belts, corals, fishes] = await Promise.all([
     db.reefs.toArray(),
     db.sites.toArray(),
+    db.siteMeasurements.toArray(),
     db.belts.toArray(),
     db.corals.toArray(),
     db.fishes.toArray()
@@ -38,6 +85,7 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     exportedAt: new Date().toISOString(),
     reefs,
     sites,
+    siteMeasurements,
     belts,
     corals,
     fishes
@@ -54,8 +102,11 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
   if (obj.app !== undefined && obj.app !== 'gbcoralbelt') {
     errors.push('app 字段应为 gbcoralbelt，文件来源不明')
   }
-  for (const key of BACKUP_KEYS) {
+  for (const key of ['reefs', 'sites', 'belts', 'corals', 'fishes'] as const) {
     if (!Array.isArray(obj[key])) errors.push(`${key} 字段缺失或不是数组`)
+  }
+  if (obj.siteMeasurements !== undefined && !Array.isArray(obj.siteMeasurements)) {
+    errors.push('siteMeasurements 字段不是数组')
   }
   if (errors.length > 0) return { ok: false, errors, payload: null }
   const payload: BackupPayload = {
@@ -63,8 +114,9 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     dbVersion: typeof obj.dbVersion === 'number' ? obj.dbVersion : DB_VERSION,
     exportedAt: typeof obj.exportedAt === 'string' ? obj.exportedAt : new Date().toISOString(),
     reefs: obj.reefs ?? [],
-    sites: obj.sites ?? [],
-    belts: obj.belts ?? [],
+    sites: normalizeArchiveSites(obj.sites ?? []),
+    siteMeasurements: obj.siteMeasurements ?? [],
+    belts: normalizeBelts(obj.belts ?? [], obj.sites ?? []),
     corals: obj.corals ?? [],
     fishes: obj.fishes ?? []
   }
@@ -76,6 +128,7 @@ export function countPayload(payload: BackupPayload): CountMap {
   return {
     reefs: payload.reefs.length,
     sites: payload.sites.length,
+    siteMeasurements: payload.siteMeasurements.length,
     belts: payload.belts.length,
     corals: payload.corals.length,
     fishes: payload.fishes.length
@@ -114,13 +167,18 @@ export function readFileText(file: File): Promise<string> {
 /** 导入快照：overwrite=true 先清空全部表，否则按主键合并 */
 export async function importBackup(payload: BackupPayload, overwrite: boolean): Promise<CountMap> {
   if (overwrite) await clearAllTables()
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
-    await db.reefs.bulkPut(payload.reefs)
-    await db.sites.bulkPut(payload.sites)
-    await db.belts.bulkPut(payload.belts)
-    await db.corals.bulkPut(payload.corals)
-    await db.fishes.bulkPut(payload.fishes)
-  })
+  await db.transaction(
+    'rw',
+    [db.reefs, db.sites, db.siteMeasurements, db.belts, db.corals, db.fishes],
+    async () => {
+      await db.reefs.bulkPut(payload.reefs)
+      await db.sites.bulkPut(payload.sites)
+      await db.siteMeasurements.bulkPut(payload.siteMeasurements)
+      await db.belts.bulkPut(payload.belts)
+      await db.corals.bulkPut(payload.corals)
+      await db.fishes.bulkPut(payload.fishes)
+    }
+  )
   return countPayload(payload)
 }
 
@@ -140,6 +198,11 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     siteMap.set(site.id, id)
     return { ...site, id, reefId: reefMap.get(site.reefId) ?? site.reefId }
   })
+  const siteMeasurements = payload.siteMeasurements.map((measurement) => ({
+    ...measurement,
+    id: createId('meas'),
+    reefId: reefMap.get(measurement.reefId) ?? measurement.reefId
+  }))
   const belts = payload.belts.map((belt) => {
     const id = createId('belt')
     beltMap.set(belt.id, id)
@@ -155,7 +218,7 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     id: createId('fsh'),
     beltId: beltMap.get(fish.beltId) ?? fish.beltId
   }))
-  return { ...payload, reefs, sites, belts, corals, fishes }
+  return { ...payload, reefs, sites, siteMeasurements, belts, corals, fishes }
 }
 
 /** 白化等级分布：各等级累计覆盖长度 */

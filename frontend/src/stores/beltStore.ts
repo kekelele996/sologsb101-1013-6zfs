@@ -7,6 +7,7 @@ import { computed, ref } from 'vue'
 import { db, createId, watchTable } from '@/utils/db'
 import type { Belt, BeltDraft, Orientation } from '@/types/belt'
 import { ORIENTATIONS, createEmptyBeltDraft } from '@/types/belt'
+import { isSiteDeploymentBlocked } from '@/types/site'
 
 /** 朝向排序权重：北 → 东 → 南 → 西 */
 export const ORIENTATION_ORDER: Record<Orientation, number> = {
@@ -100,10 +101,29 @@ export const useBeltStore = defineStore('belt', () => {
 
   async function createBelt(
     siteId: string,
-    payload: Omit<Belt, 'id' | 'createdAt' | 'updatedAt' | 'siteId'>
+    payload: Omit<Belt, 'id' | 'createdAt' | 'updatedAt' | 'siteId' | 'anchorLat' | 'anchorLng'>
   ): Promise<Belt> {
+    const site = await db.sites.get(siteId)
+    if (!site) throw new Error('站位档案不存在，无法布设样带')
+    const measurement = (await db.siteMeasurements
+      .where('reefId')
+      .equals(site.reefId)
+      .toArray()
+    ).find((item) => item.no === site.no)
+    if (isSiteDeploymentBlocked(site, measurement)) {
+      throw new Error('实测坐标与档案坐标超差，样带已压住；请等测绘组核对后再布')
+    }
+
     const now = Date.now()
-    const row: Belt = { ...payload, siteId, id: createId('belt'), createdAt: now, updatedAt: now }
+    const row: Belt = {
+      ...payload,
+      siteId,
+      anchorLat: site.chartLat,
+      anchorLng: site.chartLng,
+      id: createId('belt'),
+      createdAt: now,
+      updatedAt: now
+    }
     await db.belts.put(row)
     return row
   }
