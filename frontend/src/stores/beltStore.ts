@@ -7,6 +7,8 @@ import { computed, ref } from 'vue'
 import { db, createId, watchTable } from '@/utils/db'
 import type { Belt, BeltDraft, Orientation } from '@/types/belt'
 import { ORIENTATIONS, createEmptyBeltDraft } from '@/types/belt'
+import { latestSurveyOf } from '@/types/site'
+import { evaluateBeltPosition, beltPositionFields } from '@/utils/position'
 
 /** 朝向排序权重：北 → 东 → 南 → 西 */
 export const ORIENTATION_ORDER: Record<Orientation, number> = {
@@ -100,10 +102,25 @@ export const useBeltStore = defineStore('belt', () => {
 
   async function createBelt(
     siteId: string,
-    payload: Omit<Belt, 'id' | 'createdAt' | 'updatedAt' | 'siteId'>
+    payload: Omit<Belt, 'id' | 'createdAt' | 'updatedAt' | 'siteId' | 'lat' | 'lng' | 'positionStatus' | 'positionedAt'>
   ): Promise<Belt> {
     const now = Date.now()
-    const row: Belt = { ...payload, siteId, id: createId('belt'), createdAt: now, updatedAt: now }
+    // 样带认海图档案站位：落位坐标取档案值；实测与档案偏差超限则压住不布
+    const site = await db.sites.get(siteId)
+    const surveys = await db.siteSurveys.toArray()
+    const survey = site ? latestSurveyOf(surveys, site) : null
+    const evalResult = site ? evaluateBeltPosition(site, survey, now) : null
+    const position = evalResult
+      ? beltPositionFields(evalResult, now)
+      : { lat: null, lng: null, positionStatus: 'held' as const, positionedAt: null }
+    const row: Belt = {
+      ...payload,
+      siteId,
+      ...position,
+      id: createId('belt'),
+      createdAt: now,
+      updatedAt: now
+    }
     await db.belts.put(row)
     return row
   }

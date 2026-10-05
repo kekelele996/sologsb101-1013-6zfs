@@ -7,7 +7,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Edit, Plus, Right, Warning } from '@element-plus/icons-vue'
+import { Delete, Edit, Plus, Right, Warning, RefreshLeft } from '@element-plus/icons-vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import BleachTag from '@/components/common/BleachTag.vue'
@@ -63,6 +63,15 @@ const rows = computed(() =>
 )
 
 const conflicts = computed(() => beltStore.findBeltConflicts(siteId.value))
+
+/** 压住待核的样带数（实测与档案偏差超限） */
+const heldCount = computed(() => beltStore.beltsOfSite(siteId.value).filter((belt) => belt.positionStatus === 'held').length)
+
+/** 测绘组改准档案坐标后，已布样带按档案值重新落位 */
+async function reposition(): Promise<void> {
+  const count = await reefStore.repositionBelts(siteId.value)
+  ElMessage.success(`已按海图档案重新落位 ${count} 条样带`)
+}
 
 const stats = computed(() => {
   const belts = beltStore.beltsOfSite(siteId.value)
@@ -143,7 +152,13 @@ async function submitForm(): Promise<void> {
     } else {
       const created = await beltStore.createBelt(siteId.value, payload)
       beltStore.selectBelt(created.id)
-      ElMessage.success(`样带 ${created.no}（${created.orientation}向 ${created.lengthM} m）已布设，可录入底质与珊瑚计数`)
+      if (created.positionStatus === 'held') {
+        ElMessage.warning(
+          `样带 ${created.no} 已布设但压住待核：实测与海图偏差超限，等测绘组核对档案后放行落位`
+        )
+      } else {
+        ElMessage.success(`样带 ${created.no}（${created.orientation}向 ${created.lengthM} m）已按档案落位，可录入底质与珊瑚计数`)
+      }
     }
     dialogVisible.value = false
   } finally {
@@ -227,14 +242,22 @@ onMounted(() => {
           </el-breadcrumb>
           <h2 class="page__title">
             站位 {{ site.no }} · 样带布设
-            <el-tag size="small" effect="plain">水深 {{ site.depthM }} m</el-tag>
+            <el-tag size="small" effect="plain">海图水深 {{ site.chartDepthM }} m</el-tag>
             <el-tag size="small" type="info" effect="plain">{{ site.substrate }}</el-tag>
+            <el-tag
+              size="small"
+              :type="site.verifyStatus === '核对通过' ? 'success' : site.verifyStatus === '核对失败' ? 'danger' : 'info'"
+              effect="plain"
+            >
+              档案{{ site.verifyStatus }}
+            </el-tag>
           </h2>
           <p class="gb-hint">
-            布设样带后录入长度、朝向与调查日期；同朝向内样带编号不可重复，列表按北 → 东 → 南 → 西排序。
+            样带认海图档案站位落位；实测与档案偏差超限时样带压住不布，等测绘组核对档案后放行。同朝向内样带编号不可重复。
           </p>
         </div>
         <div class="page__actions">
+          <el-button :icon="RefreshLeft" @click="reposition">按档案重新落位</el-button>
           <el-button :icon="Warning" @click="applyOrientationOrder">朝向排序校验</el-button>
           <el-button type="primary" :icon="Plus" @click="openCreate">新增样带</el-button>
         </div>
@@ -246,6 +269,15 @@ onMounted(() => {
         <StatBadge label="珊瑚记录" :value="stats.coralCount" suffix="条" tone="success" icon="Histogram" />
         <StatBadge label="计数记录" :value="stats.fishCount" suffix="条" tone="warning" icon="DataLine" />
       </div>
+
+      <el-alert
+        v-if="heldCount > 0"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="page__alert"
+        :title="`有 ${heldCount} 条样带压住待核：实测与海图偏差超限，暂按档案坐标落位，等测绘组核对通过后放行；档案坐标改准后可点「按档案重新落位」。`"
+      />
 
       <el-alert
         v-if="conflicts.length > 0"
@@ -278,6 +310,18 @@ onMounted(() => {
         <el-table-column label="调查日期" width="130">
           <template #default="{ row }">
             <span class="gb-mono">{{ row.belt.surveyDate }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="落位状态" width="170">
+          <template #default="{ row }">
+            <el-tag v-if="row.belt.positionStatus === 'held'" size="small" type="warning" effect="plain">
+              压住待核
+            </el-tag>
+            <el-tag v-else size="small" type="success" effect="plain">已落位</el-tag>
+            <div v-if="row.belt.lat !== null && row.belt.lng !== null" class="gb-hint gb-mono">
+              {{ row.belt.lat.toFixed(4) }}, {{ row.belt.lng.toFixed(4) }}
+            </div>
+            <div v-else class="gb-hint">待档案核对后落位</div>
           </template>
         </el-table-column>
         <el-table-column prop="belt.observer" label="调查人" width="110" />

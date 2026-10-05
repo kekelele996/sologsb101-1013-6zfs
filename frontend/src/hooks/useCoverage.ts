@@ -214,7 +214,7 @@ export function useCoverage(): UseCoverageResult {
       siteNo: site.no,
       reefId: reef?.id ?? '',
       reefName: reef?.name ?? '未知礁区',
-      depthM: site.depthM,
+      depthM: site.chartDepthM,
       beltCount: siteBelts.length,
       coralCount: siteCorals.length,
       coverCmTotal,

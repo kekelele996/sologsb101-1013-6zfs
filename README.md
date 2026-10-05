@@ -32,7 +32,7 @@ docker compose up -d --build      # 修改代码后重新构建
 | 构建 | Vite 6 | 产物 `dist/`，交给 nginx 托管 |
 | 状态管理 | Pinia 2（setup store） | `reefStore` / `beltStore` / `surveyStore` |
 | 路由 | Vue Router 4（history 模式） | 路径与提示词逐字一致，支持深链刷新 |
-| 持久化 | Dexie 4（IndexedDB，库名 `gbcoralbelt`） | 结构版本 v2 + upgrade 迁移 + liveQuery 订阅 |
+| 持久化 | Dexie 4（IndexedDB，库名 `gbcoralbelt`） | 结构版本 v3 + upgrade 迁移 + liveQuery 订阅 |
 | 容器 | node:20-alpine 构建 → nginx:alpine 运行 | 多阶段构建，运行阶段 `chmod -R a+rX` |
 
 ## 三、路由与功能模块
@@ -93,11 +93,15 @@ npm run preview    # 预览构建产物
 
 ## 六、数据存储说明
 
-- **存储位置**：浏览器 IndexedDB，库名 `gbcoralbelt`，当前结构版本 `v2`。读写统一经 `frontend/src/utils/db.ts` 封装，页面组件不直接触碰 Dexie 实例。
-- **数据表**：`reefs`（礁区）、`sites`（站位）、`belts`（样带）、`corals`（珊瑚记录）、`fishes`（鱼类与无脊椎动物计数）。
-- **升级迁移**：`db.version(1)` 保留初版结构，`db.version(2).stores(...).upgrade(...)` 补齐索引并回填历史数据缺失的时间戳与必填字段（面积、经纬度、水深、样带长度、覆盖长度、计数等）；调整字段结构时递增 `DB_VERSION` 并补迁移。
+- **存储位置**：浏览器 IndexedDB，库名 `gbcoralbelt`，当前结构版本 `v3`。读写统一经 `frontend/src/utils/db.ts` 封装，页面组件不直接触碰 Dexie 实例。
+- **两份数据，各归各管**：站位坐标拆成「海图档案」与「外业实测」两份，互不覆盖。
+  - **测绘组海图档案**（`sites` 表）：海图经纬度（`chartLat`/`chartLng`）、海图水深（`chartDepthM`）、底质类型（`substrate`）与核对状态（`verifyStatus`：未核对 / 核对中 / 核对通过 / 核对失败）。
+  - **外业实测记录**（`siteSurveys` 表）：每次补测一条，记实测经纬度、实测水深与测量时间（`measuredAt`），归外业队留存；补测只写本表，不顶掉档案值。
+- **样带认档案站位**：样带落位坐标取海图档案值。布设样带时比较实测与档案偏差，超过限差（`SURVEY_DISTANCE_LIMIT_M`，默认 100 m）且档案未核对通过的，样带置为「压住待核」（`positionStatus: 'held'`，不落坐标）；等测绘组核对通过后放行落位。测绘组改准档案坐标后，可在样带布设页「按档案重新落位」，已布样带按新档案值重新落位。
+- **两边按站位编号对账**：`sites` 与 `siteSurveys` 按（礁区, 站位编号）匹配；档案缺此编号为「对不上」（查测绘组补档案），编号对得上但偏差超限为「偏差超限」（两边各查各的）。测绘组核对失败只重试本侧档案，外业实测原样不动。
+- **升级迁移**：`db.version(1)` 保留初版结构，`db.version(2).stores(...).upgrade(...)` 补齐索引并回填历史数据缺失的时间戳与必填字段；`db.version(3).stores(...)` 新增 `siteSurveys` 表、把站位索引改为海图档案字段，并在 `upgrade` 中按现有站位补出海图档案一份（旧数据未记坐标来源，原 `lat`/`lng`/`depthM` 映射为 `chartLat`/`chartLng`/`chartDepthM`，实测留空不编造来源），同时为旧样带补落位状态（按档案坐标落位）。调整字段结构时递增 `DB_VERSION` 并补迁移。
 - **首屏播种**：`initDatabase()` 在 `reefs` 表为空时执行幂等播种，生成三层互相引用的演示数据（3 个礁区 / 4 个站位 / 5 条样带 / 14 条珊瑚记录 / 12 条计数记录），覆盖「无 / 轻 / 中 / 重 / 死亡」全部白化等级，保证每个页面打开都有内容、层级路由也能命中真实 id。
 - **实时同步**：`utils/db.ts` 的 `watchTable()` 基于 Dexie `liveQuery` 订阅表变化，Pinia store 自动刷新，页面只读消费。
 - **算法口径**：珊瑚覆盖率 = 覆盖长度合计 / 样带长度 × 100%；白化指数 = 按覆盖长度加权的平均白化等级（无 0 / 轻 1 / 中 2 / 重 3 / 死亡 4，0 ~ 4），并按指数换算总体等级；鱼类密度 = 计数 / （样带长度 × 1 m）× 100（尾/100 m²）。
-- **备份与恢复**：`/coverage` 页可导出包含五张表的 JSON 快照，支持「覆盖导入」与「追加导入（重新分配 id）」；备份时间写入 `localStorage`，页脚与汇总页均展示结构版本号。
+- **备份与恢复**：`/coverage` 页可导出包含六张表（礁区、海图档案、外业实测、样带、珊瑚记录、鱼类计数）的 JSON 快照，支持「覆盖导入」与「追加导入（重新分配 id）」；备份时间写入 `localStorage`，页脚与汇总页均展示结构版本号。
 - **离线可用**：应用为纯静态资源，无任何网络请求；换浏览器或清空站点数据后数据不跟随，需通过 JSON 备份迁移。

@@ -18,16 +18,17 @@ import {
 import { bleachGrade, bleachIndex, bleachedSharePct, coralCoveragePct, fishDensity, round } from '@/utils/bleach'
 
 /** 备份集合键名 */
-export const BACKUP_KEYS = ['reefs', 'sites', 'belts', 'corals', 'fishes'] as const
+export const BACKUP_KEYS = ['reefs', 'sites', 'siteSurveys', 'belts', 'corals', 'fishes'] as const
 export type BackupKey = (typeof BACKUP_KEYS)[number]
 
 export type CountMap = Record<BackupKey, number>
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+  const [reefs, sites, siteSurveys, belts, corals, fishes] = await Promise.all([
     db.reefs.toArray(),
     db.sites.toArray(),
+    db.siteSurveys.toArray(),
     db.belts.toArray(),
     db.corals.toArray(),
     db.fishes.toArray()
@@ -38,6 +39,7 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     exportedAt: new Date().toISOString(),
     reefs,
     sites,
+    siteSurveys,
     belts,
     corals,
     fishes
@@ -64,6 +66,7 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     exportedAt: typeof obj.exportedAt === 'string' ? obj.exportedAt : new Date().toISOString(),
     reefs: obj.reefs ?? [],
     sites: obj.sites ?? [],
+    siteSurveys: obj.siteSurveys ?? [],
     belts: obj.belts ?? [],
     corals: obj.corals ?? [],
     fishes: obj.fishes ?? []
@@ -76,6 +79,7 @@ export function countPayload(payload: BackupPayload): CountMap {
   return {
     reefs: payload.reefs.length,
     sites: payload.sites.length,
+    siteSurveys: payload.siteSurveys.length,
     belts: payload.belts.length,
     corals: payload.corals.length,
     fishes: payload.fishes.length
@@ -114,9 +118,10 @@ export function readFileText(file: File): Promise<string> {
 /** 导入快照：overwrite=true 先清空全部表，否则按主键合并 */
 export async function importBackup(payload: BackupPayload, overwrite: boolean): Promise<CountMap> {
   if (overwrite) await clearAllTables()
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
+  await db.transaction('rw', [db.reefs, db.sites, db.siteSurveys, db.belts, db.corals, db.fishes], async () => {
     await db.reefs.bulkPut(payload.reefs)
     await db.sites.bulkPut(payload.sites)
+    await db.siteSurveys.bulkPut(payload.siteSurveys)
     await db.belts.bulkPut(payload.belts)
     await db.corals.bulkPut(payload.corals)
     await db.fishes.bulkPut(payload.fishes)
@@ -140,6 +145,15 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     siteMap.set(site.id, id)
     return { ...site, id, reefId: reefMap.get(site.reefId) ?? site.reefId }
   })
+  const siteSurveys = payload.siteSurveys.map((survey) => {
+    const id = createId('svy')
+    return {
+      ...survey,
+      id,
+      siteId: survey.siteId ? siteMap.get(survey.siteId) ?? survey.siteId : null,
+      reefId: reefMap.get(survey.reefId) ?? survey.reefId
+    }
+  })
   const belts = payload.belts.map((belt) => {
     const id = createId('belt')
     beltMap.set(belt.id, id)
@@ -155,7 +169,7 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     id: createId('fsh'),
     beltId: beltMap.get(fish.beltId) ?? fish.beltId
   }))
-  return { ...payload, reefs, sites, belts, corals, fishes }
+  return { ...payload, reefs, sites, siteSurveys, belts, corals, fishes }
 }
 
 /** 白化等级分布：各等级累计覆盖长度 */

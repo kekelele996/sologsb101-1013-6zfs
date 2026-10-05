@@ -7,13 +7,14 @@
  */
 import Dexie, { liveQuery, type Table } from 'dexie'
 import type { Reef } from '@/types/reef'
-import type { Site } from '@/types/site'
+import type { Site, SiteSurvey } from '@/types/site'
 import type { Belt } from '@/types/belt'
 import type { CoralRecord } from '@/types/coralRecord'
 import type { FishCount } from '@/types/fishCount'
+import { evaluateBeltPosition, beltPositionFields } from '@/utils/position'
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbcoralbelt'
@@ -32,6 +33,8 @@ export interface BackupPayload {
   exportedAt: string
   reefs: Reef[]
   sites: Site[]
+  /** 外业实测记录（与海图档案相互独立，备份时两边各留一份） */
+  siteSurveys: SiteSurvey[]
   belts: Belt[]
   corals: CoralRecord[]
   fishes: FishCount[]
@@ -40,6 +43,7 @@ export interface BackupPayload {
 export class CoralBeltDatabase extends Dexie {
   reefs!: Table<Reef, string>
   sites!: Table<Site, string>
+  siteSurveys!: Table<SiteSurvey, string>
   belts!: Table<Belt, string>
   corals!: Table<CoralRecord, string>
   fishes!: Table<FishCount, string>
@@ -57,7 +61,7 @@ export class CoralBeltDatabase extends Dexie {
     })
 
     // v2：补齐筛选与统计需要的索引（位置/面积、经纬度/水深、样带长度与朝向、白化等级、类别）
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         reefs: 'id, name, location, protectStatus, areaKm2, manager, updatedAt',
         sites: 'id, reefId, no, lat, lng, depthM, substrate, updatedAt',
@@ -85,6 +89,56 @@ export class CoralBeltDatabase extends Dexie {
               Object.assign(row, factory())
             })
         }
+      })
+
+    // v3：站位拆成「海图档案」与「外业实测」两份，样带落位认档案
+    this.version(3)
+      .stores({
+        sites: 'id, reefId, no, chartLat, chartLng, chartDepthM, substrate, verifyStatus, updatedAt',
+        siteSurveys: 'id, siteId, reefId, siteNo, measuredAt, createdAt',
+        belts: 'id, siteId, no, positionStatus, surveyDate, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        // 迁移：旧数据没记坐标来源，升级时按现有站位补出海图档案一份（外业实测留空，不编造来源）
+        await tx
+          .table('sites')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            const site = row as Record<string, unknown>
+            if (site.chartLat === undefined) {
+              site.chartLat = typeof site.lat === 'number' ? site.lat : 0
+              site.chartLng = typeof site.lng === 'number' ? site.lng : 0
+              site.chartDepthM = typeof site.depthM === 'number' ? site.depthM : 5
+              delete site.lat
+              delete site.lng
+              delete site.depthM
+            }
+            if (typeof site.substrate !== 'string' || site.substrate === '') site.substrate = '珊瑚礁石'
+            if (!['未核对', '核对中', '核对通过', '核对失败'].includes(site.verifyStatus as string)) {
+              site.verifyStatus = '未核对'
+            }
+            if (site.verifiedAt === undefined) site.verifiedAt = null
+          })
+
+        // 迁移：样带补落位状态，按档案站位坐标落位（升级时无外业实测，全部正常落位）
+        const siteRows = (await tx.table('sites').toArray()) as Array<Record<string, unknown>>
+        const siteCoord = new Map(
+          siteRows.map((site) => [site.id as string, { lat: site.chartLat as number, lng: site.chartLng as number }])
+        )
+        const now = Date.now()
+        await tx
+          .table('belts')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            const belt = row as Record<string, unknown>
+            if (belt.positionStatus === undefined) {
+              const coord = siteCoord.get(belt.siteId as string)
+              belt.lat = coord ? coord.lat : null
+              belt.lng = coord ? coord.lng : null
+              belt.positionStatus = coord ? 'positioned' : 'held'
+              belt.positionedAt = coord ? (typeof belt.createdAt === 'number' ? belt.createdAt : now) : null
+            }
+          })
       })
   }
 }
@@ -184,37 +238,95 @@ export async function seedDemoData(): Promise<void> {
       id: 'site_ql_01',
       reefId: 'reef_ql01',
       no: 'S-01',
-      lat: 19.5621,
-      lng: 110.7924,
-      depthM: 4.2,
-      substrate: '珊瑚礁石'
+      chartLat: 19.5621,
+      chartLng: 110.7924,
+      chartDepthM: 4.2,
+      substrate: '珊瑚礁石',
+      verifyStatus: '核对通过',
+      verifiedAt: now - 86400000 * 2
     },
     {
       id: 'site_ql_02',
       reefId: 'reef_ql01',
       no: 'S-02',
-      lat: 19.5487,
-      lng: 110.8103,
-      depthM: 8.6,
-      substrate: '礁砂'
+      chartLat: 19.5487,
+      chartLng: 110.8103,
+      chartDepthM: 8.6,
+      substrate: '礁砂',
+      verifyStatus: '未核对',
+      verifiedAt: null
     },
     {
       id: 'site_yr_01',
       reefId: 'reef_yr02',
       no: 'S-01',
-      lat: 16.8342,
-      lng: 112.3286,
-      depthM: 12.4,
-      substrate: '砾石'
+      chartLat: 16.8342,
+      chartLng: 112.3286,
+      chartDepthM: 12.4,
+      substrate: '砾石',
+      verifyStatus: '核对通过',
+      verifiedAt: now - 86400000 * 5
     },
     {
       id: 'site_dz_01',
       reefId: 'reef_dz03',
       no: 'S-01',
-      lat: 18.6712,
-      lng: 110.4913,
-      depthM: 6.8,
-      substrate: '岩礁'
+      chartLat: 18.6712,
+      chartLng: 110.4913,
+      chartDepthM: 6.8,
+      substrate: '岩礁',
+      verifyStatus: '核对失败',
+      verifiedAt: now - 86400000
+    }
+  ]
+
+  // 外业实测记录：与海图档案相互独立。清澜湾 S-02 实测明显偏远（触发样带压住），
+  // 清澜湾另有一条 S-99 实测在档案中无对应编号（演示对账对不上）。
+  const siteSurveys: Array<Omit<SiteSurvey, 'id' | 'createdAt'>> = [
+    {
+      siteId: 'site_ql_01',
+      reefId: 'reef_ql01',
+      siteNo: 'S-01',
+      measuredLat: 19.5625,
+      measuredLng: 110.7928,
+      measuredDepthM: 4.5,
+      measuredAt: today
+    },
+    {
+      siteId: 'site_ql_02',
+      reefId: 'reef_ql01',
+      siteNo: 'S-02',
+      measuredLat: 19.5577,
+      measuredLng: 110.8199,
+      measuredDepthM: 9.2,
+      measuredAt: today
+    },
+    {
+      siteId: 'site_yr_01',
+      reefId: 'reef_yr02',
+      siteNo: 'S-01',
+      measuredLat: 16.8346,
+      measuredLng: 112.329,
+      measuredDepthM: 12.1,
+      measuredAt: today
+    },
+    {
+      siteId: 'site_dz_01',
+      reefId: 'reef_dz03',
+      siteNo: 'S-01',
+      measuredLat: 18.6716,
+      measuredLng: 110.4917,
+      measuredDepthM: 7.1,
+      measuredAt: today
+    },
+    {
+      siteId: null,
+      reefId: 'reef_ql01',
+      siteNo: 'S-99',
+      measuredLat: 19.57,
+      measuredLng: 110.8,
+      measuredDepthM: 3.0,
+      measuredAt: today
     }
   ]
 
@@ -314,7 +426,7 @@ export async function seedDemoData(): Promise<void> {
     }
   ]
 
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
+  await db.transaction('rw', [db.reefs, db.sites, db.siteSurveys, db.belts, db.corals, db.fishes], async () => {
     const stamp = (offset: number): { createdAt: number; updatedAt: number } => ({
       createdAt: now + offset,
       updatedAt: now + offset
@@ -322,12 +434,27 @@ export async function seedDemoData(): Promise<void> {
 
     await db.reefs.bulkPut(reefs.map((reef, index) => ({ ...reef, ...stamp(index) })))
     await db.sites.bulkPut(sites.map((site, index) => ({ ...site, ...stamp(100 + index) })))
+    await db.siteSurveys.bulkPut(
+      siteSurveys.map((survey, index) => ({
+        ...survey,
+        id: `svy_${String(index + 1).padStart(2, '0')}`,
+        createdAt: now + 150 + index
+      }))
+    )
     await db.belts.bulkPut(
       belts.map((belt, index) => {
         const { corals, fishes, ...rest } = belt
         void corals
         void fishes
-        return { ...rest, ...stamp(200 + index) }
+        const site = sites.find((item) => item.id === belt.siteId)
+        const survey = siteSurveys.find((item) => item.siteId === belt.siteId) ?? null
+        const evalResult = site
+          ? evaluateBeltPosition(site as Site, survey as SiteSurvey | null, now + 200 + index)
+          : null
+        const position = evalResult
+          ? beltPositionFields(evalResult, now + 200 + index)
+          : { lat: null, lng: null, positionStatus: 'held' as const, positionedAt: null }
+        return { ...rest, ...position, ...stamp(200 + index) }
       })
     )
     await db.corals.bulkPut(
@@ -355,8 +482,15 @@ export async function initDatabase(): Promise<void> {
 
 /** 清空全部业务表（导入覆盖与重置共用） */
 export async function clearAllTables(): Promise<void> {
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
-    await Promise.all([db.reefs.clear(), db.sites.clear(), db.belts.clear(), db.corals.clear(), db.fishes.clear()])
+  await db.transaction('rw', [db.reefs, db.sites, db.siteSurveys, db.belts, db.corals, db.fishes], async () => {
+    await Promise.all([
+      db.reefs.clear(),
+      db.sites.clear(),
+      db.siteSurveys.clear(),
+      db.belts.clear(),
+      db.corals.clear(),
+      db.fishes.clear()
+    ])
   })
 }
 
@@ -368,14 +502,15 @@ export async function resetDatabase(): Promise<void> {
 
 /** 统计各表行数，供页脚概览与覆盖度页展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+  const [reefs, sites, siteSurveys, belts, corals, fishes] = await Promise.all([
     db.reefs.count(),
     db.sites.count(),
+    db.siteSurveys.count(),
     db.belts.count(),
     db.corals.count(),
     db.fishes.count()
   ])
-  return { reefs, sites, belts, corals, fishes }
+  return { reefs, sites, siteSurveys, belts, corals, fishes }
 }
 
 /** 写入结构版本号到 localStorage，便于覆盖度页比对 */
